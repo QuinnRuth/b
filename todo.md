@@ -221,32 +221,45 @@
 ## V4.0 - 数据库与持久化系统
 
 ### 项目架构升级
-- [ ] 升级为web-db-user模板
-- [ ] 配置数据库连接
-- [ ] 设置用户认证系统
+- [x] 升级为web-db-user模板（已有）
+- [x] 配置数据库连接（.env.example已创建）
+- [x] 设置用户认证系统（已有）
 
 ### 数据库设计
-- [ ] 设计玩家数据表（player_data）
-- [ ] 设计背包数据表（inventory_data）
-- [ ] 设计任务进度表（quest_progress）
-- [ ] 设计装备数据表（equipment_data）
-- [ ] 创建数据库迁移文件
+- [x] 设计玩家数据表（game_saves表已创建）
+- [x] 设计背包数据表（包含在game_saves中的inventory字段）
+- [x] 设计任务进度表（包含在game_saves中的activeQuests/completedQuests字段）
+- [x] 设计装备数据表（包含在game_saves中的equipment字段）
+- [x] 创建数据库迁移文件（schema.ts已定义）
 
 ### 存档系统
-- [ ] 实现自动保存功能（每30秒）
-- [ ] 实现手动存档功能
-- [ ] 实现读档功能
-- [ ] 添加存档槽位管理
-- [ ] 显示存档时间和进度信息
+- [x] 实现自动保存功能（每30秒）
+- [x] 实现手动存档功能（F5快捷键）
+- [x] 实现读档功能
+- [x] 添加存档槽位管理
+- [x] 显示存档时间和进度信息
 
 ### API接口
-- [ ] 创建保存游戏进度API
-- [ ] 创建加载游戏进度API
-- [ ] 创建获取存档列表API
-- [ ] 创建删除存档API
+- [x] 创建保存游戏进度API（server/gameRouter.ts:saveGame）
+- [x] 创建加载游戏进度API（server/gameRouter.ts:loadGame）
+- [x] 创建获取存档列表API（server/gameRouter.ts:listSaves）
+- [x] 创建删除存档API（server/gameRouter.ts:deleteSave）
 
 ### 前端集成
-- [ ] 添加存档/读档UI
-- [ ] 实现自动保存逻辑
-- [ ] 添加保存成功提示
-- [ ] 实现游戏启动时自动读档
+- [x] 添加存档/读档UI（SaveGameMenu组件）
+- [x] 实现自动保存逻辑（useGameSave hook）
+- [x] 添加保存成功提示（HUD中显示保存状态）
+- [x] 实现游戏启动时自动读档（WuxiaGameV3中实现）
+
+### 新增文件
+- server/gameRouter.ts - 游戏存档API路由
+- client/src/hooks/useGameSave.ts - 游戏存档自定义Hook
+- client/src/components/SaveGameMenu.tsx - 存档管理UI组件
+- .env.example - 环境变量配置模板
+
+### 功能说明
+- 自动保存：每30秒自动保存一次，保存到"AutoSave"存档
+- 手动保存：按F5快捷键手动保存到"ManualSave"存档
+- 存档管理：按ESC键打开存档菜单，可以保存、加载、删除存档
+- 自动读档：游戏启动时自动加载最近的存档
+- 存档内容：包括玩家状态（生命、内力、等级、经验、银两）、背包、装备、任务进度、玩家位置等

@@ -12,6 +12,9 @@ import { DIALOGUES, NPCS, type NPCData } from '../data/dialogues';
 import { QUESTS } from '../data/questsData';
 import type { ActiveQuest, Quest, QuestStatus, QuestObjectiveType } from '../types/quests';
 import QuestTracker from './QuestTracker';
+import { useGameSave } from '../hooks/useGameSave';
+import SaveGameMenu from './SaveGameMenu';
+import { trpc } from '../lib/trpc';
 
 // 敌人AI状态
 enum EnemyAIState {
@@ -59,6 +62,7 @@ export default function WuxiaGameV3() {
   ]);
   const [equipment, setEquipment] = useState<Equipment>({});
   const [showInventory, setShowInventory] = useState(false);
+  const [showSaveMenu, setShowSaveMenu] = useState(false);
   
   // 敌人系统
   const [enemies, setEnemies] = useState([
@@ -94,7 +98,118 @@ export default function WuxiaGameV3() {
   const [playerLevel, setPlayerLevel] = useState(1);
   const [playerExp, setPlayerExp] = useState(0);
   const [silver, setSilver] = useState(200);
-  
+
+  // 玩家位置引用（用于存档）
+  const playerGroupRef = useRef<THREE.Group | null>(null);
+  const [completedQuestIds, setCompletedQuestIds] = useState<string[]>([]);
+
+  // 游戏存档系统
+  const gameState = {
+    saveName: 'AutoSave',
+    playerHealth: health,
+    playerMaxHealth: maxHealth,
+    playerEnergy: energy,
+    playerMaxEnergy: maxEnergy,
+    playerExp,
+    playerLevel,
+    playerMoney: silver,
+    playerX: playerGroupRef.current?.position.x || 0,
+    playerY: playerGroupRef.current?.position.y || 1.5,
+    playerZ: playerGroupRef.current?.position.z || 0,
+    currentDialogue: currentDialogue?.id,
+    gameTime: timeOfDay > 0.75 || timeOfDay < 0.25 ? 'night' : timeOfDay > 0.4 && timeOfDay < 0.6 ? 'noon' : timeOfDay >= 0.25 && timeOfDay <= 0.4 ? 'morning' : 'evening',
+    score,
+    combo: comboCount,
+    inventory,
+    equipment,
+    activeQuests,
+    completedQuests: completedQuestIds,
+  };
+
+  const { saveGame, isSaving } = useGameSave(gameState, {
+    autoSaveInterval: 30000, // 每30秒自动保存
+    enabled: true,
+  });
+
+  // 加载存档
+  const loadGameMutation = trpc.game.loadGame.useMutation({
+    onSuccess: (save) => {
+      // 恢复游戏状态
+      setHealth(save.playerHealth);
+      setMaxHealth(save.playerMaxHealth);
+      setEnergy(save.playerEnergy);
+      setMaxEnergy(save.playerMaxEnergy);
+      setPlayerExp(save.playerExp);
+      setPlayerLevel(save.playerLevel);
+      setSilver(save.playerMoney);
+      setScore(save.score);
+      setComboCount(save.combo);
+
+      // 恢复背包和装备
+      try {
+        const loadedInventory = JSON.parse(save.inventory);
+        const loadedEquipment = JSON.parse(save.equipment);
+        const loadedActiveQuests = JSON.parse(save.activeQuests);
+        const loadedCompletedQuests = JSON.parse(save.completedQuests);
+
+        setInventory(loadedInventory);
+        setEquipment(loadedEquipment);
+        setActiveQuests(loadedActiveQuests);
+        setCompletedQuestIds(loadedCompletedQuests);
+
+        // 恢复玩家位置（在下次渲染时应用）
+        if (playerGroupRef.current) {
+          playerGroupRef.current.position.set(save.playerX, save.playerY, save.playerZ);
+        }
+
+        setGameMessage('存档加载成功');
+        setTimeout(() => setGameMessage(''), 2000);
+      } catch (error) {
+        console.error('Failed to parse save data:', error);
+        setGameMessage('存档数据错误');
+        setTimeout(() => setGameMessage(''), 3000);
+      }
+    },
+    onError: (error) => {
+      setGameMessage('加载失败：' + error.message);
+      setTimeout(() => setGameMessage(''), 3000);
+    },
+  });
+
+  const handleLoadGame = (saveId: number) => {
+    loadGameMutation.mutate({ saveId });
+  };
+
+  const handleSaveGame = (saveName: string) => {
+    saveGame(saveName).then((result) => {
+      if (result.success) {
+        setGameMessage('存档已保存');
+        setTimeout(() => setGameMessage(''), 2000);
+      } else {
+        setGameMessage('保存失败：' + result.message);
+        setTimeout(() => setGameMessage(''), 3000);
+      }
+    });
+  };
+
+  // 获取最近的存档（用于自动加载）
+  const { data: latestSave } = trpc.game.getLatestSave.useQuery(undefined, {
+    retry: false,
+  });
+
+  // 游戏启动时自动加载最近的存档
+  useEffect(() => {
+    if (latestSave && playerGroupRef.current) {
+      // 只在组件首次加载且有存档时自动加载
+      const hasAutoLoaded = sessionStorage.getItem('hasAutoLoaded');
+      if (!hasAutoLoaded) {
+        console.log('Auto-loading latest save:', latestSave.saveName);
+        handleLoadGame(latestSave.id);
+        sessionStorage.setItem('hasAutoLoaded', 'true');
+      }
+    }
+  }, [latestSave]); // 只依赖latestSave，避免循环
+
   // 背包操作
   const handleUseItem = (item: Item) => {
     if (item.type === 'consumable' && item.effect) {
@@ -551,6 +666,9 @@ export default function WuxiaGameV3() {
     playerGroup.position.set(0, 1.5, 0);
     scene.add(playerGroup);
 
+    // 保存玩家组引用用于存档
+    playerGroupRef.current = playerGroup;
+
     // 玩家武器（剑）
     const swordGeo = new THREE.BoxGeometry(0.1, 2, 0.1);
     const swordMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.8 });
@@ -817,6 +935,26 @@ export default function WuxiaGameV3() {
           setCurrentDialogue(null);
         }
         e.preventDefault();
+      }
+
+      // F5快捷键手动保存
+      if (e.key === 'F5') {
+        e.preventDefault();
+        saveGame('ManualSave').then((result) => {
+          if (result.success) {
+            setGameMessage('游戏已保存');
+            setTimeout(() => setGameMessage(''), 2000);
+          } else {
+            setGameMessage('保存失败：' + result.message);
+            setTimeout(() => setGameMessage(''), 3000);
+          }
+        });
+      }
+
+      // ESC键打开/关闭存档菜单
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowSaveMenu((prev) => !prev);
       }
     };
     
@@ -1171,6 +1309,19 @@ export default function WuxiaGameV3() {
         <div className="bg-black/50 text-white px-4 py-2 rounded">
           FPS: {fps}
         </div>
+        <div className="bg-black/50 text-white px-4 py-2 rounded flex items-center gap-2">
+          {isSaving ? (
+            <>
+              <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+              <span className="text-yellow-400 text-sm">保存中...</span>
+            </>
+          ) : (
+            <>
+              <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+              <span className="text-green-400 text-sm">自动保存</span>
+            </>
+          )}
+        </div>
         <div className="bg-black/50 text-white px-4 py-2 rounded">
           <div className="text-sm mb-1">生命值</div>
           <div className="w-48 h-4 bg-gray-700 rounded overflow-hidden">
@@ -1342,7 +1493,7 @@ export default function WuxiaGameV3() {
 
       {/* 任务追踪 */}
       <QuestTracker activeQuests={activeQuests} />
-      
+
       {/* 连击显示 */}
       {comboCount > 1 && (
         <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none">
@@ -1352,6 +1503,15 @@ export default function WuxiaGameV3() {
             {comboCount} 连击!
           </div>
         </div>
+      )}
+
+      {/* 存档菜单 */}
+      {showSaveMenu && (
+        <SaveGameMenu
+          onClose={() => setShowSaveMenu(false)}
+          onLoad={handleLoadGame}
+          onSave={handleSaveGame}
+        />
       )}
     </div>
   );
