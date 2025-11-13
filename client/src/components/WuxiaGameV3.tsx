@@ -12,6 +12,10 @@ import { DIALOGUES, NPCS, type NPCData } from '../data/dialogues';
 import { QUESTS } from '../data/questsData';
 import type { ActiveQuest, Quest, QuestStatus, QuestObjectiveType } from '../types/quests';
 import QuestTracker from './QuestTracker';
+import CharacterSwitcher from './CharacterSwitcher';
+import ElementReactionEffect from './ElementReactionEffect';
+import { PLAYABLE_CHARACTERS, getCharacterList, type Character } from '../types/characters';
+import { ElementType, ElementStatus, calculateElementReaction, ELEMENT_CONFIGS, type ElementReactionResult } from '../types/elements';
 
 // 敌人AI状态
 enum EnemyAIState {
@@ -32,6 +36,7 @@ interface EnemyInstance {
   patrolIndex: number;
   patrolPoints: THREE.Vector3[];
   lastAttackTime: number;
+  elementStatus: ElementStatus | null; // 元素附着状态
 }
 
 // 敌人配置
@@ -94,7 +99,25 @@ export default function WuxiaGameV3() {
   const [playerLevel, setPlayerLevel] = useState(1);
   const [playerExp, setPlayerExp] = useState(0);
   const [silver, setSilver] = useState(200);
-  
+
+  // 角色系统
+  const [characters, setCharacters] = useState<Character[]>(() => {
+    const charList = getCharacterList();
+    return charList.map(char => ({
+      ...char,
+      element: { ...char.element }
+    }));
+  });
+  const [activeCharacterIndex, setActiveCharacterIndex] = useState(0);
+  const activeCharacter = characters[activeCharacterIndex];
+
+  // 元素反应系统
+  const [elementReactions, setElementReactions] = useState<Array<{
+    id: string;
+    reaction: ElementReactionResult;
+    screenPosition: { x: number; y: number };
+  }>>([]);
+
   // 背包操作
   const handleUseItem = (item: Item) => {
     if (item.type === 'consumable' && item.effect) {
@@ -277,6 +300,195 @@ export default function WuxiaGameV3() {
     
     setGameMessage(`完成任务：${quest.title}`);
     setTimeout(() => setGameMessage(''), 3000);
+  };
+
+  // 角色切换函数
+  const handleCharacterSwitch = (character: Character) => {
+    const newIndex = characters.findIndex(c => c.id === character.id);
+    if (newIndex !== -1 && newIndex !== activeCharacterIndex) {
+      setActiveCharacterIndex(newIndex);
+      setGameMessage(`切换至 ${character.name}`);
+      setTimeout(() => setGameMessage(''), 1500);
+
+      // 更新玩家属性
+      setMaxHealth(character.baseStats.maxHealth);
+      setHealth(Math.min(health, character.baseStats.maxHealth));
+    }
+  };
+
+  // 应用元素到敌人
+  const applyElementToEnemy = (
+    enemy: EnemyInstance,
+    element: ElementType,
+    strength: number
+  ) => {
+    const now = Date.now();
+    enemy.elementStatus = {
+      element,
+      duration: 5, // 5秒持续时间
+      strength,
+      appliedAt: now,
+    };
+
+    // 更新敌人颜色以显示元素附着
+    const elementConfig = ELEMENT_CONFIGS[element];
+    const material = enemy.mesh.material as THREE.MeshStandardMaterial;
+    material.emissive = new THREE.Color(elementConfig.color);
+    material.emissiveIntensity = 0.5;
+  };
+
+  // 触发元素反应
+  const triggerElementReaction = (
+    enemy: EnemyInstance,
+    newElement: ElementType,
+    baseDamage: number,
+    camera: THREE.Camera
+  ) => {
+    if (!enemy.elementStatus) {
+      // 没有现有元素状态，直接应用新元素
+      applyElementToEnemy(enemy, newElement, 1);
+      return baseDamage;
+    }
+
+    const existingElement = enemy.elementStatus.element;
+
+    // 如果是相同元素，不触发反应
+    if (existingElement === newElement) {
+      return baseDamage;
+    }
+
+    // 计算元素反应
+    const reactionResult = calculateElementReaction(
+      newElement,
+      existingElement,
+      baseDamage,
+      activeCharacter.element.elementMastery
+    );
+
+    if (reactionResult) {
+      // 生成反应位置(屏幕坐标)
+      const screenPos = enemy.group.position.clone().project(camera);
+      const x = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
+      const y = (-(screenPos.y * 0.5) + 0.5) * window.innerHeight;
+
+      setElementReactions(prev => [
+        ...prev,
+        {
+          id: `reaction_${Date.now()}_${Math.random()}`,
+          reaction: { ...reactionResult, position: enemy.group.position.clone() as any },
+          screenPosition: { x, y },
+        },
+      ]);
+
+      // 清除敌人的元素状态(反应消耗元素)
+      enemy.elementStatus = null;
+      const material = enemy.mesh.material as THREE.MeshStandardMaterial;
+      material.emissive = new THREE.Color(0x000000);
+      material.emissiveIntensity = 0;
+
+      // 为当前角色充能(元素反应产生能量)
+      setCharacters(prev => prev.map((char, idx) => {
+        if (idx === activeCharacterIndex) {
+          const energyGain = 10;
+          return {
+            ...char,
+            element: {
+              ...char.element,
+              burstEnergy: Math.min(
+                char.element.burstEnergy + energyGain,
+                char.element.maxBurstEnergy
+              ),
+            },
+          };
+        }
+        return char;
+      }));
+
+      return reactionResult.damage;
+    } else {
+      // 没有反应，直接应用新元素
+      applyElementToEnemy(enemy, newElement, 1);
+      return baseDamage;
+    }
+  };
+
+  // 使用角色爆发技能
+  const useBurstSkill = (camera: THREE.Camera, enemyInstances: EnemyInstance[], emitParticles: any) => {
+    const burstSkill = activeCharacter.skills.burst;
+
+    if (activeCharacter.element.burstEnergy >= activeCharacter.element.maxBurstEnergy) {
+      // 消耗爆发能量
+      setCharacters(prev => prev.map((char, idx) => {
+        if (idx === activeCharacterIndex) {
+          return {
+            ...char,
+            element: {
+              ...char.element,
+              burstEnergy: 0,
+            },
+          };
+        }
+        return char;
+      }));
+
+      setGameMessage(`${activeCharacter.name} - ${burstSkill.name}!`);
+      setTimeout(() => setGameMessage(''), 2000);
+
+      // 对范围内的敌人造成伤害
+      enemyInstances.forEach((enemy) => {
+        if (enemy.aiState !== EnemyAIState.DEAD) {
+          const distance = enemy.group.position.length();
+          if (distance < burstSkill.range) {
+            const elementConfig = ELEMENT_CONFIGS[activeCharacter.element.elementType];
+            const baseDamage = Math.floor(
+              burstSkill.damage *
+              elementConfig.baseDamageMultiplier *
+              activeCharacter.element.burstDamageMultiplier
+            );
+
+            // 触发元素反应
+            const finalDamage = triggerElementReaction(
+              enemy,
+              activeCharacter.element.elementType,
+              baseDamage,
+              camera
+            );
+
+            enemy.health -= finalDamage;
+
+            if (enemy.health <= 0) {
+              enemy.aiState = EnemyAIState.DEAD;
+            }
+
+            // 生成伤害数字
+            const screenPos = enemy.group.position.clone().project(camera);
+            const x = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
+            const y = (-(screenPos.y * 0.5) + 0.5) * window.innerHeight;
+
+            setDamageNumbers((prev) => [
+              ...prev,
+              {
+                id: `dmg_${Date.now()}_${Math.random()}`,
+                damage: finalDamage,
+                x,
+                y,
+                isCritical: true,
+                isSkill: true,
+              },
+            ]);
+          }
+        }
+      });
+
+      // 粒子效果
+      const elementConfig = ELEMENT_CONFIGS[activeCharacter.element.elementType];
+      emitParticles(
+        new THREE.Vector3(0, 1.5, 0),
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Color(elementConfig.color),
+        100
+      );
+    }
   };
 
   useEffect(() => {
@@ -544,7 +756,7 @@ export default function WuxiaGameV3() {
     // 玩家
     const playerGroup = new THREE.Group();
     const playerGeo = new THREE.CapsuleGeometry(0.5, 2, 8, 16);
-    const playerMat = new THREE.MeshStandardMaterial({ color: 0x0066ff });
+    const playerMat = new THREE.MeshStandardMaterial({ color: activeCharacter.color });
     const playerMesh = new THREE.Mesh(playerGeo, playerMat);
     playerMesh.castShadow = true;
     playerGroup.add(playerMesh);
@@ -599,6 +811,7 @@ export default function WuxiaGameV3() {
         patrolIndex: 0,
         patrolPoints,
         lastAttackTime: 0,
+        elementStatus: null,
       };
     });
 
@@ -699,10 +912,25 @@ export default function WuxiaGameV3() {
       if (e.key.toLowerCase() === 'i') {
         setShowInventory((prev) => !prev);
       }
-      
-      // 使用技能
-      if (e.key === '1' || e.key === '2' || e.key === '3') {
-        const skillIndex = parseInt(e.key) - 1;
+
+      // 角色切换 (1-4键)
+      if (e.key === '1' || e.key === '2' || e.key === '3' || e.key === '4') {
+        const charIndex = parseInt(e.key) - 1;
+        if (charIndex < characters.length) {
+          handleCharacterSwitch(characters[charIndex]);
+          // 更新玩家颜色
+          (playerMesh.material as THREE.MeshStandardMaterial).color.setHex(characters[charIndex].color);
+        }
+      }
+
+      // 元素爆发 (Q键)
+      if (e.key.toLowerCase() === 'q') {
+        useBurstSkill(camera, enemyInstances, emitParticles);
+      }
+
+      // 使用角色技能 (旧系统，现在改为 5, 6, 7键)
+      if (e.key === '5' || e.key === '6' || e.key === '7') {
+        const skillIndex = parseInt(e.key) - 5;
         const skill = skills[skillIndex];
         if (skill && skill.currentCooldown === 0 && energy >= skill.config.energyCost) {
           setEnergy((prev) => prev - skill.config.energyCost);
@@ -846,10 +1074,40 @@ export default function WuxiaGameV3() {
 
         const distance = playerGroup.position.distanceTo(enemy.group.position);
         if (distance < 5) {
-          const attackPower = 20 + (equipment.weapon?.stats?.attack || 0);
+          // 使用角色元素属性计算基础伤害
+          const elementConfig = ELEMENT_CONFIGS[activeCharacter.element.elementType];
+          const baseAttack = activeCharacter.baseStats.attack + (equipment.weapon?.stats?.attack || 0);
+          const attackPower = Math.floor(baseAttack * elementConfig.baseDamageMultiplier);
+
           const isCritical = Math.random() < 0.2; // 20%暴击率
-          const finalDamage = isCritical ? Math.floor(attackPower * 1.5) : attackPower;
-          
+          let baseDamage = isCritical ? Math.floor(attackPower * 1.5) : attackPower;
+
+          // 触发元素反应
+          const finalDamage = triggerElementReaction(
+            enemy,
+            activeCharacter.element.elementType,
+            baseDamage,
+            camera
+          );
+
+          // 为当前角色充能(攻击产生少量能量)
+          setCharacters(prev => prev.map((char, idx) => {
+            if (idx === activeCharacterIndex) {
+              const energyGain = 5;
+              return {
+                ...char,
+                element: {
+                  ...char.element,
+                  burstEnergy: Math.min(
+                    char.element.burstEnergy + energyGain,
+                    char.element.maxBurstEnergy
+                  ),
+                },
+              };
+            }
+            return char;
+          }));
+
           enemy.health -= finalDamage;
           setEnemies((prev) =>
             prev.map((e) =>
@@ -883,12 +1141,12 @@ export default function WuxiaGameV3() {
           }
           setLastHitTime(now);
 
-          // 粒子效果
+          // 粒子效果 (使用元素颜色)
           emitParticles(
             enemy.group.position.clone(),
             new THREE.Vector3(0, 1, 0),
-            new THREE.Color(isCritical ? 0xff3333 : 0x00ffff),
-            isCritical ? 20 : 10
+            new THREE.Color(isCritical ? 0xff3333 : elementConfig.color),
+            isCritical ? 20 : 15
           );
 
           if (enemy.health <= 0) {
@@ -1158,7 +1416,7 @@ export default function WuxiaGameV3() {
       renderer.dispose();
       composer.dispose();
     };
-  }, [equipment, maxEnergy, maxHealth, timeOfDay]);
+  }, [equipment, maxEnergy, maxHealth, timeOfDay, activeCharacter, activeCharacterIndex, characters]);
 
   const allEnemiesDead = enemies.every((e) => e.health <= 0);
 
@@ -1199,17 +1457,20 @@ export default function WuxiaGameV3() {
         <div className="bg-black/50 text-white px-4 py-2 rounded">
           时间: {timeOfDay < 0.25 ? '凌晨' : timeOfDay < 0.5 ? '早晨' : timeOfDay < 0.75 ? '下午' : '黄昏'}
         </div>
+        <div className="bg-black/50 text-white px-4 py-2 rounded">
+          <div className="text-sm mb-1">
+            当前角色: {ELEMENT_CONFIGS[activeCharacter.element.elementType].icon} {activeCharacter.name}
+          </div>
+          <div className="text-xs text-gray-300">{activeCharacter.title}</div>
+        </div>
       </div>
 
-      {/* 背包按钮 */}
-      <div className="absolute top-4 left-1/2 transform -translate-x-1/2">
-        <button
-          onClick={() => setShowInventory(!showInventory)}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold"
-        >
-          背包 (I)
-        </button>
-      </div>
+      {/* 角色切换器 */}
+      <CharacterSwitcher
+        characters={characters}
+        activeCharacter={activeCharacter}
+        onSwitch={handleCharacterSwitch}
+      />
 
       {/* 敌人状态 */}
       <div className="absolute top-4 right-4 bg-black/50 text-white px-4 py-2 rounded">
@@ -1255,9 +1516,12 @@ export default function WuxiaGameV3() {
         <div>WASD - 移动</div>
         <div>空格 - 跳跃/二段跳</div>
         <div>Shift - 轻功奔跑</div>
-        <div>鼠标左键 - 攻击</div>
+        <div>鼠标左键 - 元素攻击</div>
+        <div>1/2/3/4 - 切换角色</div>
+        <div>Q - 元素爆发</div>
         <div>I - 打开背包</div>
-        <div>1/2/3 - 使用技能</div>
+        <div>5/6/7 - 使用技能</div>
+        <div>E - NPC交互</div>
         <div>T - 切换时间（调试）</div>
       </div>
 
@@ -1342,7 +1606,40 @@ export default function WuxiaGameV3() {
 
       {/* 任务追踪 */}
       <QuestTracker activeQuests={activeQuests} />
-      
+
+      {/* 元素反应效果 */}
+      {elementReactions.map((reaction) => (
+        <ElementReactionEffect
+          key={reaction.id}
+          reaction={reaction.reaction.reaction}
+          position={reaction.screenPosition}
+          onComplete={() => {
+            setElementReactions((prev) => prev.filter((r) => r.id !== reaction.id));
+          }}
+        />
+      ))}
+
+      {/* 元素爆发能量显示 */}
+      <div className="absolute bottom-24 left-1/2 transform -translate-x-1/2">
+        <div className="bg-black/70 px-6 py-3 rounded-lg">
+          <div className="text-center text-white text-sm mb-1">
+            {activeCharacter.name} - 元素爆发 (Q)
+          </div>
+          <div className="w-64 h-3 bg-gray-700 rounded overflow-hidden">
+            <div
+              className="h-full transition-all"
+              style={{
+                width: `${(activeCharacter.element.burstEnergy / activeCharacter.element.maxBurstEnergy) * 100}%`,
+                backgroundColor: `#${ELEMENT_CONFIGS[activeCharacter.element.elementType].color.toString(16).padStart(6, '0')}`,
+              }}
+            />
+          </div>
+          <div className="text-xs text-center text-white mt-1">
+            {Math.floor(activeCharacter.element.burstEnergy)} / {activeCharacter.element.maxBurstEnergy}
+          </div>
+        </div>
+      </div>
+
       {/* 连击显示 */}
       {comboCount > 1 && (
         <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none">
